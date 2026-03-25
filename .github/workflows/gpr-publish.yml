@@ -1,0 +1,72 @@
+name: Publish preview package to GPR
+
+on:
+  push:
+    branches-ignore:
+      - main
+  pull_request:
+    types: [opened, reopened, synchronize]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  publish-preview:
+    name: Publish preview package
+    runs-on: ubuntu-latest
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.number && format('refs/pull/{0}/head', github.event.pull_request.number) || github.ref }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "20.x"
+          registry-url: "https://npm.pkg.github.com"
+          scope: "@tetherto"
+
+      - name: Install dependencies
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci
+          else
+            npm install
+          fi
+
+      - name: Build package
+        run: npm run build --if-present
+
+      - name: Prepare preview version and dist-tag
+        id: preview
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            DIST_TAG="pr-${{ github.event.pull_request.number }}"
+            CHANNEL="pr${{ github.event.pull_request.number }}"
+          else
+            BRANCH="${GITHUB_REF#refs/heads/}"
+            DIST_TAG=$(echo "$BRANCH" | tr '[:upper:]' '[:lower:]' | sed 's#[^a-z0-9._-]#-#g')
+            CHANNEL=$(echo "$DIST_TAG" | sed 's#[^a-z0-9]#-#g')
+          fi
+
+          BASE_VERSION=$(node -p "require('./package.json').version")
+          BASE_VERSION="${BASE_VERSION%%-*}"
+          PREVIEW_VERSION="${BASE_VERSION}-${CHANNEL}.${GITHUB_RUN_NUMBER}.${GITHUB_RUN_ATTEMPT}"
+
+          echo "dist_tag=$DIST_TAG" >> "$GITHUB_OUTPUT"
+          echo "preview_version=$PREVIEW_VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Set preview package version
+        run: npm version "${{ steps.preview.outputs.preview_version }}" --no-git-tag-version
+
+      - name: Publish preview to GitHub Packages
+        run: npm publish --registry https://npm.pkg.github.com --tag "${{ steps.preview.outputs.dist_tag }}" --ignore-scripts
+        env:
+          NODE_AUTH_TOKEN: ${{ github.token }}
